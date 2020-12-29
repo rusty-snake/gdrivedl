@@ -5,6 +5,8 @@ import os
 import re
 import sys
 import unicodedata
+import argparse
+import logging
 
 try:
     #Python3
@@ -78,128 +80,144 @@ def sanitize(filename):
 
     return filename
 
+class GDriveDL(object):
+    def __init__(self, quiet=False, overwrite=False):
+        self._quiet = quiet
+        self._overwrite = overwrite
 
-def process_item(id, directory):
-    url = ITEM_URL.format(id=id)
-    resp = urlopen(url)
-    url = resp.geturl()
-    html = resp.read().decode('utf-8')
+    def process_item(self, id, directory, filename=None):
+        url = ITEM_URL.format(id=id)
+        resp = urlopen(url)
+        url = resp.geturl()
+        html = resp.read().decode('utf-8')
 
-    if '/file/' in url:
-        match = FILE_PATTERN.search(html)
+        if '/file/' in url:
+            match = FILE_PATTERN.search(html)
+            data = match.group(1).replace('\/', '/')
+            data = data.replace(r'\x5b', '[').replace(r'\x22', '"').replace(r'\x5d', ']').replace(r'\n','')
+            data = json.loads(data)
+
+            file_size = int(data[25][2])
+            if filename is None:
+                file_path = os.path.join(directory, sanitize(data[1]))
+            else:
+                file_path = filename if os.path.isabs(filename) else os.path.join(directory, filename)
+                self._overwrite = True
+
+            if not os.path.exists(directory):
+                os.mkdir(directory)
+                logging.info('Directory: {directory} [Created]'.format(directory=directory))
+
+            self.process_file(id, file_path, file_size)
+        elif '/folders/' in url:
+            if filename:
+                logging.warn("Ignoring --output-document option for folder download")
+            self.process_folder(id, directory, html=html)
+        elif 'ServiceLogin' in url:
+            logging.error('Id {} does not have link sharing enabled'.format(id))
+            sys.exit(1)
+        else:
+            logging.error('That id {} returned an unknown url'.format(id))
+            sys.exit(1)
+
+
+    def process_folder(self, id, directory, html=None):
+        if not html:
+            url = FOLDER_URL.format(id=id)
+            html = urlopen(url).read().decode('utf-8')
+
+        match = FOLDER_PATTERN.search(html)
         data = match.group(1).replace('\/', '/')
         data = data.replace(r'\x5b', '[').replace(r'\x22', '"').replace(r'\x5d', ']').replace(r'\n','')
         data = json.loads(data)
 
-        file_name = sanitize(data[1])
-        file_size = int(data[25][2])
-        file_path = os.path.join(directory, file_name)
+        if not os.path.exists(directory):
+            os.mkdir(directory)
+            logging.info('Directory: {directory} [Created]'.format(directory=directory))
 
-        process_file(id, file_path, file_size)
-    elif '/folders/' in url:
-        process_folder(id, directory, html=html)
-    elif 'ServiceLogin' in url:
-        sys.stderr.write('Id {} does not have link sharing enabled'.format(id))
-        sys.exit(1)
+        if not data[0]:
+            return
+
+        for item in sorted(data[0], key=lambda i: i[3] == FOLDER_TYPE):
+            item_id = item[0]
+            item_name = sanitize(item[2])
+            item_type = item[3]
+            item_size = item[13]
+            item_path = os.path.join(directory, item_name)
+
+            if item_type == FOLDER_TYPE:
+                self.process_folder(item_id, item_path)
+            else:
+                self.process_file(item_id, item_path, int(item_size))
+
+
+    def process_file(self, id, file_path, file_size, confirm='', cookies=''):
+        if not self._overwrite and os.path.exists(file_path):
+            logging.info('{file_path} [Exists]'.format(file_path=file_path))
+            return
+
+        url = FILE_URL.format(id=id, confirm=confirm)
+        req = Request(url, headers={'Cookie': cookies,
+                                    'User-Agent': 'Mozilla/5.0'})
+        resp = urlopen(req)
+        cookies = resp.headers.get('Set-Cookie') or ''
+
+        if not confirm and 'download_warning' in cookies:
+            confirm = CONFIRM_PATTERN.search(cookies)
+            return self.process_file(id, file_path, file_size, confirm.group(1), cookies)
+
+        if not self._quiet:
+            output(file_path + '\n')
+
+        try:
+            with open(file_path, 'wb') as f:
+                dl = 0
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+
+                    if b'Too many users have viewed or downloaded this file recently' in chunk:
+                        logging.error('Quota exceeded for this file')
+                        sys.exit(1)
+
+                    dl += len(chunk)
+                    f.write(chunk)
+                    if not self._quiet:
+                        done = int(50 * dl / file_size)
+                        output("\r[{}{}] {:.2f}MB/{:.2f}MB".format(
+                            '=' * done,
+                            ' ' *
+                            (50 - done),
+                            dl / 1024 / 1024,
+                            file_size / 1024 / 1024
+                        ))
+                        sys.stdout.flush()
+        except:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise
+
+        if not self._quiet:
+            output('\n')
+
+
+def main(args=None):
+    parser = argparse.ArgumentParser(description='Download Google Drive files & folders')
+    parser.add_argument("url", help="Shared Google Drive URL")
+    parser.add_argument("-P", "--directory-prefix", default='.', help="Output directory (default is current directory)")
+    parser.add_argument("-O", "--output-document", help="Output filename. Defaults to the GDrive filename. Not valid when downloading folders")
+    parser.add_argument("-q", "--quiet", help="Disable console output",
+        default=False, action="store_true")
+    args = parser.parse_args(args)
+
+    if args.quiet:
+        logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.WARN)
     else:
-        sys.stderr.write('That id {} returned an unknown url'.format(id))
-        sys.exit(1)
+        logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.INFO)
 
-
-def process_folder(id, directory, html=None):
-    if not html:
-        url = FOLDER_URL.format(id=id)
-        html = urlopen(url).read().decode('utf-8')
-
-    match = FOLDER_PATTERN.search(html)
-    data = match.group(1).replace('\/', '/')
-    data = data.replace(r'\x5b', '[').replace(r'\x22', '"').replace(r'\x5d', ']').replace(r'\n','')
-    data = json.loads(data)
-
-    if not os.path.exists(directory):
-        os.mkdir(directory)
-        output('Directory: {directory} [Created]\n'.format(directory=directory))
-    else:
-        output('Directory: {directory} [Exists]\n'.format(directory=directory))
-
-    if not data[0]:
-        return
-
-    for item in sorted(data[0], key=lambda i: i[3] == FOLDER_TYPE):
-        item_id = item[0]
-        item_name = sanitize(item[2])
-        item_type = item[3]
-        item_size = item[13]
-        item_path = os.path.join(directory, item_name)
-
-        if item_type == FOLDER_TYPE:
-            process_folder(item_id, item_path)
-        else:
-            process_file(item_id, item_path, int(item_size))
-
-
-def process_file(id, file_path, file_size, confirm='', cookies=''):
-    if os.path.exists(file_path):
-        output('{file_path} [Exists]\n'.format(file_path=file_path))
-        return
-
-    url = FILE_URL.format(id=id, confirm=confirm)
-    req = Request(url, headers={'Cookie': cookies,
-                                'User-Agent': 'Mozilla/5.0'})
-    resp = urlopen(req)
-    cookies = resp.headers.get('Set-Cookie') or ''
-
-    if not confirm and 'download_warning' in cookies:
-        confirm = CONFIRM_PATTERN.search(cookies)
-        return process_file(id, file_path, file_size, confirm.group(1), cookies)
-
-    output(file_path + '\n')
-
-    try:
-        with open(file_path, 'wb') as f:
-            dl = 0
-            while True:
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-
-                if b'Too many users have viewed or downloaded this file recently' in chunk:
-                    raise Exception('Quota exceeded for this file')
-
-                dl += len(chunk)
-                f.write(chunk)
-                done = int(50 * dl / file_size)
-                output("\r[{}{}] {:.2f}MB/{:.2f}MB".format(
-                    '=' * done,
-                    ' ' *
-                    (50 - done),
-                    dl / 1024 / 1024,
-                    file_size / 1024 / 1024
-                ))
-                sys.stdout.flush()
-    except:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise
-
-    output('\n')
-
-
-def get_arg(pos, default=None):
-    try:
-        return sys.argv[pos]
-    except IndexError:
-        return default
-
-
-if __name__ == '__main__':
-    url = get_arg(1, '').strip()
-    directory = get_arg(2, './').strip()
+    url = args.url
     id = ''
-
-    if not url:
-        sys.stderr.write('A Google Drive URL is required')
-        sys.exit(1)
 
     for pattern in ID_PATTERNS:
         match = pattern.search(url)
@@ -208,7 +226,13 @@ if __name__ == '__main__':
             break
 
     if not id:
-        sys.stderr.write('Unable to get ID from {}'.format(url))
+        logging.error('Unable to get ID from {}'.format(url))
         sys.exit(1)
 
-    process_item(id, directory)
+    gdrive = GDriveDL(quiet=args.quiet)
+    gdrive.process_item(id, directory=args.directory_prefix, filename=args.output_document)
+
+
+if __name__ == "__main__":
+    main()
+

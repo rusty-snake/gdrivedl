@@ -9,20 +9,15 @@ Google Drive Download Script
 -   Works with large files
 -   Files / Folders must have been shared via link
 
-### Usage
+## Usage
 
 ```bash
-python gdrivedl.py <URL> <DIRECTORY>
+python gdrivedl.py <URL>
 ```
--   URL is Shared Goolge Drive URL containing ID
--   DIRECTORY (Optional, defaults to current directory `./`)
+-   URL is a shared Google Drive URL
 
-### Example Linux Usage
-
-```bash
-sudo curl https://raw.githubusercontent.com/matthuisman/gdrivedl/master/gdrivedl.py --output GDriveDL
-
-sudo chmod +x GDriveDL
-
-./GDriveDL https://drive.google.com/open?id=1yXsJq7TTMgUVXbOnCalyupESFN-tm2nc ./some_folder
-```
+### Options
+- `-P` `--directory-prefix` Output directory (default is current directory)
+- `-O` `--output-document` Download to a particular filename (defaults to the
+  GDrive filename). Not valid when downloading folders.
+- `-q` `--quiet` Disable console output
