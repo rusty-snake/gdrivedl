@@ -6,9 +6,9 @@ Graphical wrapper for GDriveDL using bash and zenity.
 Installation
 ------------
 
-1. Make sure "~/.local/bin` is in `$PATH`
-2. Clone this repo (`git clone "https://github.com/matthuisman/gdrivedl.git" && cd gdrivedl/GDriveDL`)
-3. Execute the commands below
+1. Make sure `~/.local/bin` is in `$PATH`.
+2. Clone this repo (`git clone "https://github.com/rusty-snake/gdrivedl.git" && cd gdrivedl/GDriveDL`).
+3. Execute the commands below to install GDriveDL-GUI to your home.
 ```
 install -Dm0755 GDriveDL "$HOME"/.local/bin/GDriveDL
 install -Dm0755 ../gdrivedl.py "$HOME"/.local/bin/gdrivedl.py
