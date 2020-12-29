@@ -1,3 +1,8 @@
+Fork of https://github.com/matthuisman/gdrivedl with a linux only gui based on zenity.
+Look at https://github.com/rusty-snake/gdrivedl/tree/master/GDriveDL-GUI for it.
+
+-----
+
 # GDriveDL
 
 Google Drive Download Script
