@@ -17,7 +17,7 @@ while [[ -z "$GDURL" ]]; do
 done
 
 # Start download
-if gdrivedl.py "$GDURL" "$HOME"/Downloads >/dev/null; then
+if gdrivedl.py -q -P "$HOME"/Downloads "$GDURL"; then
 	echo "# Finish"
 else
 	echo "# Failed"
