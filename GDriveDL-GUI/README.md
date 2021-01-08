@@ -1,6 +1,8 @@
 GDriveDL-GUI (Linux only)
 =========================
 
+[![maintenance-status: as-is (as of 2021-01-08)](https://img.shields.io/badge/maintenance--status-as--is_%28as_of_2021--01--08%29-yellow)](https://gist.github.com/rusty-snake/574a91f1df9f97ec77ca308d6d731e29)
+
 Graphical wrapper for GDriveDL using bash and zenity.
 
 Installation
