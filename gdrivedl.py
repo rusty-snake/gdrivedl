@@ -7,30 +7,35 @@ import sys
 import unicodedata
 import argparse
 import logging
+from contextlib import contextmanager
 
 try:
     #Python3
-    from urllib.request import Request, urlopen
+    from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+    from http.cookiejar import CookieJar
 except ImportError:
     #Python2
-    from urllib2 import Request, urlopen
+    from urllib2 import Request, urlopen, build_opener, HTTPCookieProcessor
+    from cookielib import CookieJar
 
 ITEM_URL = 'https://drive.google.com/open?id={id}'
 FILE_URL = 'https://docs.google.com/uc?export=download&id={id}&confirm={confirm}'
-FOLDER_URL = 'https://drive.google.com/drive/folders/{id}'
+FOLDER_URL = 'https://drive.google.com/embeddedfolderview?id={id}#list'
+CHUNKSIZE = 4096
+USER_AGENT = 'Mozilla/5.0'
 
 ID_PATTERNS = [
     re.compile('/file/d/([0-9A-Za-z_-]{10,})(?:/|$)', re.IGNORECASE),
+    re.compile('/folders/([0-9A-Za-z_-]{10,})(?:/|$)', re.IGNORECASE),
     re.compile('id=([0-9A-Za-z_-]{10,})(?:&|$)', re.IGNORECASE),
     re.compile('([0-9A-Za-z_-]{10,})', re.IGNORECASE)
 ]
-FILE_PATTERN = re.compile("itemJson: (\[.*?)};</script>",
-                          re.DOTALL | re.IGNORECASE)
-FOLDER_PATTERN = re.compile("window\['_DRIVE_ivd'\] = '(.*?)';",
+FOLDER_PATTERN = re.compile('<a href="(https://drive.google.com/.*?)".*?<div class="flip-entry-title">(.*?)</div>',
                             re.DOTALL | re.IGNORECASE)
 CONFIRM_PATTERN = re.compile("download_warning[0-9A-Za-z_-]+=([0-9A-Za-z_-]+);",
                              re.IGNORECASE)
-FOLDER_TYPE = 'application/vnd.google-apps.folder'
+FILENAME_PATTERN = re.compile('attachment;filename="(.*?)"',
+                             re.IGNORECASE)
 
 def output(text):
     try:
@@ -80,123 +85,131 @@ def sanitize(filename):
 
     return filename
 
+def url_to_id(url):
+    for pattern in ID_PATTERNS:
+        match = pattern.search(url)
+        if match:
+            return match.group(1)
+
+    logging.error('Unable to get ID from {}'.format(url))
+    sys.exit(1)
+
 class GDriveDL(object):
     def __init__(self, quiet=False, overwrite=False):
         self._quiet = quiet
         self._overwrite = overwrite
+        self._create_empty_dirs = True
+        self._opener = build_opener(HTTPCookieProcessor(CookieJar()))
 
-    def process_item(self, id, directory, filename=None):
-        url = ITEM_URL.format(id=id)
-        resp = urlopen(url)
-        url = resp.geturl()
-        html = resp.read().decode('utf-8')
+    @contextmanager
+    def _request(self, url):
+        logging.debug('Requesting: {}'.format(url))
+        req = Request(url, headers={'User-Agent': USER_AGENT})
 
-        if '/file/' in url:
-            match = FILE_PATTERN.search(html)
-            data = match.group(1).replace('\/', '/')
-            data = data.replace(r'\x5b', '[').replace(r'\x22', '"').replace(r'\x5d', ']').replace(r'\n','')
-            data = json.loads(data)
+        f = self._opener.open(req)
+        try:
+            yield f
+        finally:
+            f.close()
 
-            file_size = int(data[25][2])
-            if filename is None:
-                file_path = os.path.join(directory, sanitize(data[1]))
-            else:
-                file_path = filename if os.path.isabs(filename) else os.path.join(directory, filename)
-                self._overwrite = True
+    def process_url(self, url, directory, filename=None):
+        id = url_to_id(url)
+        url = url.lower()
 
-            if not os.path.exists(directory):
-                os.mkdir(directory)
-                logging.info('Directory: {directory} [Created]'.format(directory=directory))
+        if '://' not in url:
+            with self._request(ITEM_URL.format(id=id)) as resp:
+                url = resp.geturl()
 
-            self.process_file(id, file_path, file_size)
+        if '/file/' in url or '/uc?' in url:
+            self.process_file(id, directory, filename=filename)
         elif '/folders/' in url:
             if filename:
                 logging.warn("Ignoring --output-document option for folder download")
-            self.process_folder(id, directory, html=html)
-        elif 'ServiceLogin' in url:
-            logging.error('Id {} does not have link sharing enabled'.format(id))
-            sys.exit(1)
+            self.process_folder(id, directory)
         else:
-            logging.error('That id {} returned an unknown url'.format(id))
+            logging.error('That id {} returned an unknown url {}'.format(id, url))
             sys.exit(1)
 
+    def process_folder(self, id, directory):
+        with self._request(FOLDER_URL.format(id=id)) as resp:
+            html = resp.read().decode('utf-8')
 
-    def process_folder(self, id, directory, html=None):
-        if not html:
-            url = FOLDER_URL.format(id=id)
-            html = urlopen(url).read().decode('utf-8')
+        matches = re.findall(FOLDER_PATTERN, html)
 
-        match = FOLDER_PATTERN.search(html)
-        data = match.group(1).replace('\/', '/')
-        data = data.replace(r'\x5b', '[').replace(r'\x22', '"').replace(r'\x5d', ']').replace(r'\n','')
-        data = json.loads(data)
+        if not matches and 'ServiceLogin' in html:
+            logging.error('Folder: {} does not have link sharing enabled'.format(id))
+            sys.exit(1)
 
-        if not os.path.exists(directory):
-            os.mkdir(directory)
+        for match in matches:
+            url, item_name = match
+            id = url_to_id(url)
+
+            if '/file/' in url.lower():
+                self.process_file(id, directory, filename=sanitize(item_name))
+            elif '/folders/' in url.lower():
+                self.process_folder(id, os.path.join(directory, sanitize(item_name)))
+
+        if self._create_empty_dirs and not os.path.exists(directory):
+            os.makedirs(directory)
             logging.info('Directory: {directory} [Created]'.format(directory=directory))
 
-        if not data[0]:
-            return
+    def process_file(self, id, directory, filename=None, confirm=''):
+        file_path = None
 
-        for item in sorted(data[0], key=lambda i: i[3] == FOLDER_TYPE):
-            item_id = item[0]
-            item_name = sanitize(item[2])
-            item_type = item[3]
-            item_size = item[13]
-            item_path = os.path.join(directory, item_name)
+        if filename:
+            file_path = filename if os.path.isabs(filename) else os.path.join(directory, filename)
+            if not self._overwrite and os.path.exists(file_path):
+                logging.info('{file_path} [Exists]'.format(file_path=file_path))
+                return
 
-            if item_type == FOLDER_TYPE:
-                self.process_folder(item_id, item_path)
-            else:
-                self.process_file(item_id, item_path, int(item_size))
+        with self._request(FILE_URL.format(id=id, confirm=confirm)) as resp:
+            if 'ServiceLogin' in resp.url:
+                logging.error('File: {} does not have link sharing enabled'.format(id))
+                sys.exit(1)
 
+            cookies = resp.headers.get('Set-Cookie') or ''
+            if not confirm and 'download_warning' in cookies:
+                confirm = CONFIRM_PATTERN.search(cookies)
+                return self.process_file(id, directory, filename=filename, confirm=confirm.group(1))
 
-    def process_file(self, id, file_path, file_size, confirm='', cookies=''):
-        if not self._overwrite and os.path.exists(file_path):
-            logging.info('{file_path} [Exists]'.format(file_path=file_path))
-            return
+            if not file_path:
+                filename = FILENAME_PATTERN.search(resp.headers.get('content-disposition')).group(1)
+                file_path = os.path.join(directory, sanitize(filename))
+                if not self._overwrite and os.path.exists(file_path):
+                    logging.info('{file_path} [Exists]'.format(file_path=file_path))
+                    return
 
-        url = FILE_URL.format(id=id, confirm=confirm)
-        req = Request(url, headers={'Cookie': cookies,
-                                    'User-Agent': 'Mozilla/5.0'})
-        resp = urlopen(req)
-        cookies = resp.headers.get('Set-Cookie') or ''
+            directory = os.path.dirname(file_path)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+                logging.info('Directory: {directory} [Created]'.format(directory=directory))
 
-        if not confirm and 'download_warning' in cookies:
-            confirm = CONFIRM_PATTERN.search(cookies)
-            return self.process_file(id, file_path, file_size, confirm.group(1), cookies)
+            try:
+                with open(file_path, 'wb') as f:
+                    dl = 0
+                    last_out = 0
+                    while True:
+                        chunk = resp.read(CHUNKSIZE)
+                        if not chunk:
+                            break
 
-        if not self._quiet:
-            output(file_path + '\n')
+                        if b'Too many users have viewed or downloaded this file recently' in chunk:
+                            logging.error('Quota exceeded for this file')
+                            sys.exit(1)
 
-        try:
-            with open(file_path, 'wb') as f:
-                dl = 0
-                while True:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
-
-                    if b'Too many users have viewed or downloaded this file recently' in chunk:
-                        logging.error('Quota exceeded for this file')
-                        sys.exit(1)
-
-                    dl += len(chunk)
-                    f.write(chunk)
-                    if not self._quiet:
-                        done = int(50 * dl / file_size)
-                        output("\r[{}{}] {:.2f}MB/{:.2f}MB".format(
-                            '=' * done,
-                            ' ' *
-                            (50 - done),
-                            dl / 1024 / 1024,
-                            file_size / 1024 / 1024
-                        ))
-                        sys.stdout.flush()
-        except:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            raise
+                        dl += len(chunk)
+                        f.write(chunk)
+                        if not self._quiet and (not last_out or dl-last_out > 1048576):
+                            output("\r{} {:.2f}MB".format(
+                                file_path,
+                                dl / 1024 / 1024,
+                            ))
+                            last_out = dl
+                            sys.stdout.flush()
+            except:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                raise
 
         if not self._quiet:
             output('\n')
@@ -207,8 +220,7 @@ def main(args=None):
     parser.add_argument("url", help="Shared Google Drive URL")
     parser.add_argument("-P", "--directory-prefix", default='.', help="Output directory (default is current directory)")
     parser.add_argument("-O", "--output-document", help="Output filename. Defaults to the GDrive filename. Not valid when downloading folders")
-    parser.add_argument("-q", "--quiet", help="Disable console output",
-        default=False, action="store_true")
+    parser.add_argument("-q", "--quiet", help="Disable console output", default=False, action="store_true")
     args = parser.parse_args(args)
 
     if args.quiet:
@@ -229,10 +241,9 @@ def main(args=None):
         logging.error('Unable to get ID from {}'.format(url))
         sys.exit(1)
 
-    gdrive = GDriveDL(quiet=args.quiet)
-    gdrive.process_item(id, directory=args.directory_prefix, filename=args.output_document)
+    gdrive = GDriveDL(quiet=args.quiet, overwrite=args.output_document is not None)
+    gdrive.process_url(url, directory=args.directory_prefix, filename=args.output_document)
 
 
 if __name__ == "__main__":
     main()
-
