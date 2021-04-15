@@ -7,6 +7,12 @@ if ! command -v zenity >/dev/null; then
 	exit 1
 fi
 
+if command -v firejail >/dev/null; then
+	firejail=(firejail --profile="$HOME/.config/firejail/gdrivedl.py.profile")
+else
+	firejail=()
+fi
+
 # Ask for a GDrive-URL
 while [[ -z "$GDURL" ]]; do
 	GDURL="$(zenity --title=GDriveDL --entry --text="Google Drive URL")"
@@ -17,7 +23,7 @@ while [[ -z "$GDURL" ]]; do
 done
 
 # Start download
-if gdrivedl.py -q -P "$HOME"/Downloads "$GDURL"; then
+if "${firejail[@]}" python3 "$HOME"/.local/bin/gdrivedl.py -q -P "$HOME"/Downloads "$GDURL"; then
 	echo "# Finish"
 else
 	echo "# Failed"
